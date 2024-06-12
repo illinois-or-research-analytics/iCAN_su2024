@@ -104,6 +104,8 @@ def query_pubmed(
         batch_size = 300  # Adjust this size as needed to avoid the URL length limit
 
         for i in range(0, len(id_list), batch_size):
+            print(f"Fetching detailed information for batch starting at index {i}.")
+
             id_batch = id_list[i : i + batch_size]
             logging.info(
                 f"Fetching detailed information for batch starting at index {i}."
@@ -193,11 +195,13 @@ def main():
         output_dir = "output"
         write_dois_to_csv(dois, output_dir, "dois.csv")
 
-        logging.log("Done.")
+        # Okay cool, let's plot a chart
+
+        logging.info("Done.\n")
         print("Done.")
 
     except Exception as e:
-        logging.error(f"An error occured: {e}")
+        logging.error(f"An error occured: {e}\n")
         print(e)
 
 
