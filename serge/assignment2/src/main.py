@@ -16,16 +16,19 @@ logging.basicConfig(
 )
 
 
-def query_pubmed(
-    start_date: str, end_date: str, max_results: str
-) -> Optional[list[str]]:
+def query_pubmed(start_date: str, end_date: str) -> Optional[list[str]]:
     """
     Will query the pubmed database using a specified search criteria.
+
+    Heavily inpired by example 3
+    https://www.ncbi.nlm.nih.gov/books/NBK25498/#_chapter3_Application_3_Retrieving_large_
+
+    Note that PubMed will not allow eFetch queries exceeding 10,000 articles. To query
+    more than 10,000 values, look to eDirect command line utility.
 
     Params:
         start_date: begin search window here
         end_date: end search window here
-        max_results: the max number or search results to return
 
     Returns:
         an XML element tree.
@@ -33,27 +36,27 @@ def query_pubmed(
     # Define query here
     search_term = f'("extracellular vesicles"[MeSH Terms] OR ("extracellular"[All Fields] AND "vesicles"[All Fields]) OR "extracellular vesicles"[All Fields] OR ("extracellular"[All Fields] AND "vesicle"[All Fields]) OR "extracellular vesicle"[All Fields]) AND {start_date}:{end_date}[Date - Publication] AND "English"[Language]'
 
-    # Base url and search params
+    # Base url and fetch url
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-    def fetch_ids(retstart: int):
-        """Helper method gets the ids of search term"""
+    def fetch_detailed_info(web_env: str, query_key: str, retstart: int) -> str:
+        """
+        Helper method will fetch detailed XML data
+
+        Params:
+            query_key: the query key representing search criteria
+            retstart: tells the database what index to start fetching from
+            web_env: a hash representing an eSearch session, UID values are cached
+            on a 'history' server, web_env references the session so we can fetch
+            the relevant articles
+        """
         query_string = {
             "db": "pubmed",
-            "term": search_term,
-            "retmax": max_results,
+            "query_key": query_key,
+            "WebEnv": web_env,
             "retstart": retstart,
-        }
-        response = requests.get(base_url, query_string)
-        response.raise_for_status()
-        return response.text
-
-    def fetch_detailed_info(id_batch: list[str]) -> str:
-        """Helper method will fetch detailed XML data"""
-        fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-        query_string = {
-            "db": "pubmed",
-            "id": ",".join(id_batch),
+            "retmax": 500,
             "rettype": "medline",
             "retmode": "xml",
         }
@@ -64,9 +67,28 @@ def query_pubmed(
     try:
         # Perform the initial search request
         logging.info("Performing initial search request to PubMed.")
-        initial_results = fetch_ids(0)
-        root = ET.fromstring(initial_results)
-        total_count = int(root.find(".//Count").text)
+
+        query_string = {
+            "db": "pubmed",
+            "usehistory": "y",
+            "term": search_term,
+        }
+        response = requests.get(base_url, query_string)
+        response.raise_for_status()
+        root = ET.fromstring(response.text)
+
+        # Unpack the eSearch results
+        total_count = int(root.find(".//Count").text or "0")
+        web_env = root.find(".//WebEnv").text or "NA"
+        query_key = root.find(".//QueryKey").text or "NA"
+
+        logging.info(
+            f"Total articles: {total_count}, WebEnv: {web_env}, QueryKey: {query_key}"
+        )
+
+        if total_count == 0:
+            logging.warning("No articles found.")
+            return None
 
         # Confirm with user before proceeding
         while True:
@@ -74,52 +96,24 @@ def query_pubmed(
             if std_in in ["y", "yes"]:
                 break
             elif std_in in ["n", "no"]:
-                logging.info("User interupted.")
+                logging.info("User interrupted.")
                 return None
-
             print("Please enter 'y' or 'n'.")
 
-        id_list: list[str] = []
-
-        # Collect IDs from the initial batch
-        for id_elem in root.findall(".//Id"):
-            if id_elem.text:
-                id_list.append(id_elem.text)
-
-        # If more results are available, paginate, we need all the IDs
-        for start in range(10000, total_count, 10000):
-            logging.info(f"Fetching additional results starting at {start}.")
-            paginated_results = fetch_ids(start)
-            paginated_root = ET.fromstring(paginated_results)
-            for id_elem in paginated_root.findall(".//Id"):
-                if id_elem.text:
-                    id_list.append(id_elem.text)
-
-        if not id_list:
-            logging.warning("No article IDs found.")
-            return None
-
-        # Fetch detailed information in batches and parse DOIs
         dois: list[str] = []
-        batch_size = 300  # Adjust this size as needed to avoid the URL length limit
 
-        for i in range(0, len(id_list), batch_size):
-            print(f"Fetching detailed information for batch starting at index {i}.")
+        # Fetch detailed information in batches
+        for start in range(0, total_count, 500):
+            logging.info(f"Fetching additional results starting at index {start}.")
+            print(f"Fetching additional results starting at index {start}.")
 
-            id_batch = id_list[i : i + batch_size]
-            logging.info(
-                f"Fetching detailed information for batch starting at index {i}."
-            )
-            detailed_info = fetch_detailed_info(id_batch)
+            detailed_info = fetch_detailed_info(web_env, query_key, start)
             batch_tree = ET.fromstring(detailed_info)
 
-            # We build up one big list of DOIs and
-            # write that to CSV in one go.
-
+            # Parse DOIs from XML data
             dois.extend(parse_dois_from_tree(batch_tree))
 
         return dois
-
     except (requests.RequestException, ET.ParseError) as e:
         raise Exception(e)
         return None
@@ -178,30 +172,24 @@ def main():
     start_date = "2018/01/01"
     end_date = "2022/12/31"
 
-    # 10,000 is the max allowed value here,
-    # if you want more you'll have to paginate.
-
-    max_results = 10000
-
     try:
         # Attempt to query pubmed for XML data
-        dois = query_pubmed(start_date, end_date, max_results)
+        dois = query_pubmed(start_date, end_date)
 
         if not dois:
             logging.error("No DOIs found.")
             print("No DOIs found.")
+            return
 
         # Attempt to write DOIs to CSV
         output_dir = "output"
         write_dois_to_csv(dois, output_dir, "dois.csv")
 
-        # Okay cool, let's plot a chart
-
-        logging.info("Done.\n")
+        logging.info("Done.")
         print("Done.")
 
     except Exception as e:
-        logging.error(f"An error occured: {e}\n")
+        logging.error(f"An error occured: {e}")
         print(e)
 
 
